@@ -20,3 +20,5 @@ Route::get('/signout', 'AuthController@signout');
 
 Route::get('/calendar', 'CalendarController@home');
 Route::get('/mails', 'MailsController@home');
+
+
