@@ -1,0 +1,246 @@
+Prepare Laravel App
+- run 
+- composer create-project --prefer-dist laravel/laravel project-be-auth-example
+- cd into project-be-auth-example
+- run php artisan serve
+
+Create an app on azure
+- Open https://portal.azure.com/
+- Navigate to Active Directory 
+- Navigate to App Directory
+- Then New Registration and fill the App Details. 
+- Copy the app-id = 989f4920-18b6-4fbf-8c99-a474d04910ac
+- Copy the tenant-id = 1eb848bb-23e0-4da9-863c-a4aaad11d139
+- From your newly created application, navigate to Authentication from the left panel
+- Activate Implicit grant flow by checking ID Token/AccessToken and save
+- Navigate to Certificates & secrets
+- On Client secrets, Create New Secret and copy it - dQ~-yk~4t46RJsff7PyAM7Y5uteFnW2~Wg
+
+Integrating the app to azure 
+- You'll need to have PHP, Composer, and Laravel installed on your development machine.
+- You can jump to full tutorial on this page - https://docs.microsoft.com/en-us/graph/tutorials/php
+
+Lets install some additional packages
+- oauth2-client for handling sign-in and OAuth token flows.
+- microsoft-graph for making calls to Microsoft Graph.
+    composer require league/oauth2-client microsoft/microsoft-graph
+- Prepare your layouts and views.
+- Update the base Controller class in ./app/Http/Controllers/Controller.php by adding the following function to the class.
+
+public function loadViewData()
+{
+    $viewData = [];
+
+    // Check for flash errors
+    if (session('error')) {
+        $viewData['error'] = session('error');
+        $viewData['errorDetail'] = session('errorDetail');
+    }
+
+    // Check for logged on user
+    if (session('userName'))
+    {
+        $viewData['userName'] = session('userName');
+        $viewData['userEmail'] = session('userEmail');
+    }
+
+    return $viewData;
+}
+
+- Create A landing page called HomeController.php on ./app/Http/Controllers and add.
+<?php
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+namespace App\Http\Controllers;
+
+use App\Http\Controllers\Controller;
+use Illuminate\Http\Request;
+
+class HomeController extends Controller
+{
+  public function welcome()
+  {
+    $viewData = $this->loadViewData();
+
+    return view('welcome', $viewData);
+  }
+}
+
+- Update ./routes/web.php to point to our new landing page 
+    Route::get('/', 'HomeController@welcome');
+
+Add Azure AD authentication
+- Add the following Lines on .env file.
+    OAUTH_APP_ID=989f4920-18b6-4fbf-8c99-a474d04910ac
+    OAUTH_APP_PASSWORD=dQ~-yk~4t46RJsff7PyAM7Y5uteFnW2~Wg
+    OAUTH_REDIRECT_URI=http://localhost:8000/callback
+    OAUTH_SCOPES='openid profile offline_access user.read calendars.read'
+    OAUTH_AUTHORITY=https://login.microsoftonline.com/common
+    OAUTH_AUTHORIZE_ENDPOINT=/oauth2/v2.0/authorize
+    OAUTH_TOKEN_ENDPOINT=/oauth2/v2.0/token
+
+Implement Authentication 
+- Add AuthController.php to ./app/Http/Controllers and add.
+        <?php
+
+        namespace App\Http\Controllers;
+
+        use App\Http\Controllers\Controller;
+        use Illuminate\Http\Request;
+
+        use Microsoft\Graph\Graph;
+        use Microsoft\Graph\Model;
+
+        class AuthController extends Controller
+        {
+        public function signin()
+        {
+            // Initialize the OAuth client
+            $oauthClient = new \League\OAuth2\Client\Provider\GenericProvider([
+            'clientId'                => env('OAUTH_APP_ID'),
+            'clientSecret'            => env('OAUTH_APP_PASSWORD'),
+            'redirectUri'             => env('OAUTH_REDIRECT_URI'),
+            'urlAuthorize'            => env('OAUTH_AUTHORITY').env('OAUTH_AUTHORIZE_ENDPOINT'),
+            'urlAccessToken'          => env('OAUTH_AUTHORITY').env('OAUTH_TOKEN_ENDPOINT'),
+            'urlResourceOwnerDetails' => '',
+            'scopes'                  => env('OAUTH_SCOPES')
+            ]);
+
+            $authUrl = $oauthClient->getAuthorizationUrl();
+
+            // Save client state so we can validate in callback
+            session(['oauthState' => $oauthClient->getState()]);
+
+            // Redirect to AAD signin page
+            return redirect()->away($authUrl);
+        }
+
+        public function callback(Request $request)
+        {
+            // Validate state
+            $expectedState = session('oauthState');
+            $request->session()->forget('oauthState');
+            $providedState = $request->query('state');
+
+            if (!isset($expectedState)) {
+            // If there is no expected state in the session,
+            // do nothing and redirect to the home page.
+            return redirect('/');
+            }
+
+            if (!isset($providedState) || $expectedState != $providedState) {
+            return redirect('/')
+                ->with('error', 'Invalid auth state')
+                ->with('errorDetail', 'The provided auth state did not match the expected value');
+            }
+
+            // Authorization code should be in the "code" query param
+            $authCode = $request->query('code');
+            if (isset($authCode)) {
+            // Initialize the OAuth client
+            $oauthClient = new \League\OAuth2\Client\Provider\GenericProvider([
+                'clientId'                => env('OAUTH_APP_ID'),
+                'clientSecret'            => env('OAUTH_APP_PASSWORD'),
+                'redirectUri'             => env('OAUTH_REDIRECT_URI'),
+                'urlAuthorize'            => env('OAUTH_AUTHORITY').env('OAUTH_AUTHORIZE_ENDPOINT'),
+                'urlAccessToken'          => env('OAUTH_AUTHORITY').env('OAUTH_TOKEN_ENDPOINT'),
+                'urlResourceOwnerDetails' => '',
+                'scopes'                  => env('OAUTH_SCOPES')
+            ]);
+
+            try {
+                    // Make the token request
+                    $accessToken = $oauthClient->getAccessToken('authorization_code', [
+                        'code' => $authCode
+                    ]);
+
+                    $graph = new Graph();
+                    $graph->setAccessToken($accessToken->getToken());
+
+                    $user = $graph->createRequest('GET', '/me')
+                        ->setReturnType(Model\User::class)
+                        ->execute();
+
+                    // TEMPORARY FOR TESTING!
+                    return redirect('/')
+                        ->with('error', 'Access token received')
+                        ->with('errorDetail', 'User:'.$user->getDisplayName().', Token:'.$accessToken->getToken());
+                }
+            }
+
+            return redirect('/')
+            ->with('error', $request->query('error'))
+            ->with('errorDetail', $request->query('error_description'));
+        }
+    }
+
+- Register the routes to ./routes/web.php.
+    Route::get('/signin', 'AuthController@signin');
+    Route::get('/callback', 'AuthController@callback');
+
+- Implement sign out
+    public function signout(){
+        $tokenCache = new TokenCache();
+        $tokenCache->clearTokens();
+        return redirect('/');
+
+  }
+
+    Route::get('/signout', 'AuthController@signout');
+
+- Implement refresh token
+
+Open ./app/TokenStore/TokenCache.php and add the following function to the TokenCache class.
+public function updateTokens($accessToken) {
+  session([
+    'accessToken' => $accessToken->getToken(),
+    'refreshToken' => $accessToken->getRefreshToken(),
+    'tokenExpires' => $accessToken->getExpires()
+  ]);
+}
+
+public function getAccessToken() {
+  // Check if tokens exist
+  if (empty(session('accessToken')) ||
+      empty(session('refreshToken')) ||
+      empty(session('tokenExpires'))) {
+    return '';
+  }
+
+  // Check if token is expired
+  //Get current time + 5 minutes (to allow for time differences)
+  $now = time() + 300;
+  if (session('tokenExpires') <= $now) {
+    // Token is expired (or very close to it)
+    // so let's refresh
+
+    // Initialize the OAuth client
+    $oauthClient = new \League\OAuth2\Client\Provider\GenericProvider([
+      'clientId'                => env('OAUTH_APP_ID'),
+      'clientSecret'            => env('OAUTH_APP_PASSWORD'),
+      'redirectUri'             => env('OAUTH_REDIRECT_URI'),
+      'urlAuthorize'            => env('OAUTH_AUTHORITY').env('OAUTH_AUTHORIZE_ENDPOINT'),
+      'urlAccessToken'          => env('OAUTH_AUTHORITY').env('OAUTH_TOKEN_ENDPOINT'),
+      'urlResourceOwnerDetails' => '',
+      'scopes'                  => env('OAUTH_SCOPES')
+    ]);
+
+    try {
+      $newToken = $oauthClient->getAccessToken('refresh_token', [
+        'refresh_token' => session('refreshToken')
+      ]);
+
+      // Store the new values
+      $this->updateTokens($newToken);
+
+      return $newToken->getToken();
+    }
+    catch (League\OAuth2\Client\Provider\Exception\IdentityProviderException $e) {
+      return '';
+    }
+  }
+
+  // Token is still valid, just return it
+  return session('accessToken');
+}
